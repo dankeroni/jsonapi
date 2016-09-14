@@ -132,13 +132,10 @@ func handleHTTPError(response *http.Response, onHTTPError HTTPErrorCallback,
 	}
 
 	var Error Error
-	err = json.Unmarshal(body, &Error)
-	if err != nil {
-		onInternalError(err)
-		return
-
-	}
-
+	Error.Status = response.StatusCode
+	Error.Message = string(body[:])
+	Error.Error = response.Status
+	json.Unmarshal(body, &Error)
 	onHTTPError(Error.Status, Error.Message, Error.Error)
 }
 

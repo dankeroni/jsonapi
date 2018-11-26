@@ -3,6 +3,7 @@ package jsonapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -46,6 +47,16 @@ func (r *Request) SetHeader(key, value string) *Request {
 	return r
 }
 
+func (r *Request) SetBody(v *bytes.Reader) {
+	r.request.ContentLength = int64(v.Len())
+	r.request.Body = ioutil.NopCloser(v)
+	snapshot := *v
+	r.request.GetBody = func() (io.ReadCloser, error) {
+		r := snapshot
+		return ioutil.NopCloser(&r), nil
+	}
+}
+
 func (r *Request) execute(verb, urlString string, parameters url.Values,
 	requestBody interface{}, responseBody interface{}, onSuccess SuccessCallback,
 	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) (response *http.Response, err error) {
@@ -63,7 +74,7 @@ func (r *Request) execute(verb, urlString string, parameters url.Values,
 			return
 		}
 
-		r.request.Body = ioutil.NopCloser(bytes.NewReader(serializedRequestBody))
+		r.SetBody(bytes.NewReader(serializedRequestBody))
 	}
 
 	if err != nil {

@@ -3,6 +3,7 @@ package jsonapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -15,10 +16,14 @@ type Error struct {
 	Message string `json:"message"`
 }
 
+type MiddlewareFunction func(r *http.Request) error
+
 // JSONAPI struct
 type JSONAPI struct {
 	BaseURL string
 	Headers map[string]string
+
+	middleware []MiddlewareFunction
 }
 
 // SuccessCallback runs on a successfull request and parse
@@ -32,33 +37,63 @@ type InternalErrorCallback func(error)
 
 var client = &http.Client{}
 
-func (jsonAPI *JSONAPI) request(verb, url string, parameters url.Values,
+type Request struct {
+	api     *JSONAPI
+	request *http.Request
+}
+
+func (r *Request) SetHeader(key, value string) *Request {
+	r.request.Header.Set(key, value)
+	return r
+}
+
+func (r *Request) SetBody(v *bytes.Reader) {
+	r.request.ContentLength = int64(v.Len())
+	r.request.Body = ioutil.NopCloser(v)
+	snapshot := *v
+	r.request.GetBody = func() (io.ReadCloser, error) {
+		r := snapshot
+		return ioutil.NopCloser(&r), nil
+	}
+}
+
+func (r *Request) execute(verb, urlString string, parameters url.Values,
 	requestBody interface{}, responseBody interface{}, onSuccess SuccessCallback,
-	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) {
-	url = jsonAPI.BaseURL + url + "?" + parameters.Encode()
-	var request *http.Request
-	var err error
+	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	r.request.Method = verb
+	r.request.URL, err = url.Parse(r.api.BaseURL + urlString + "?" + parameters.Encode())
+	if err != nil {
+		return
+	}
+
 	if requestBody != nil {
-		serializedRequestBody, err := json.Marshal(requestBody)
+		var serializedRequestBody []byte
+		serializedRequestBody, err = json.Marshal(requestBody)
 		if err != nil {
 			onInternalError(err)
 			return
 		}
 
-		serializedRequestBodyReader := bytes.NewReader(serializedRequestBody)
-		request, err = http.NewRequest(verb, url, serializedRequestBodyReader)
-	} else {
-		request, err = http.NewRequest(verb, url, nil)
+		r.SetBody(bytes.NewReader(serializedRequestBody))
 	}
+
 	if err != nil {
 		onInternalError(err)
 		return
 	}
 
-	for name, value := range jsonAPI.Headers {
-		request.Header.Add(name, value)
+	for name, value := range r.api.Headers {
+		r.request.Header.Add(name, value)
 	}
-	response, err := client.Do(request)
+
+	for _, middleware := range r.api.middleware {
+		err = middleware(r.request)
+		if err != nil {
+			return
+		}
+	}
+
+	response, err = client.Do(r.request)
 	if err != nil {
 		onInternalError(err)
 		return
@@ -70,37 +105,86 @@ func (jsonAPI *JSONAPI) request(verb, url string, parameters url.Values,
 	}
 
 	handleSuccess(response, responseBody, onSuccess, onInternalError)
+
+	return
+}
+
+// Get request
+func (r *Request) Get(url string, parameters url.Values,
+	responseBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return r.execute("GET", url, parameters, nil, responseBody, onSuccess,
+		onHTTPError, onInternalError)
+}
+
+// Put request
+func (r *Request) Put(url string, parameters url.Values,
+	responseBody interface{}, requestBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return r.execute("PUT", url, parameters, requestBody, responseBody, onSuccess,
+		onHTTPError, onInternalError)
+}
+
+// Post request
+func (r *Request) Post(url string, parameters url.Values,
+	responseBody interface{}, requestBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return r.execute("POST", url, parameters, requestBody, responseBody, onSuccess,
+		onHTTPError, onInternalError)
+}
+
+// Delete request
+func (r *Request) Delete(url string, parameters url.Values,
+	responseBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return r.execute("DELETE", url, parameters, nil, responseBody, onSuccess,
+		onHTTPError, onInternalError)
+}
+
+func (jsonAPI *JSONAPI) R() *Request {
+	r := &Request{
+		api: jsonAPI,
+	}
+
+	request, _ := http.NewRequest("GET", "", nil)
+	r.request = request
+
+	return r
+}
+
+func (jsonAPI *JSONAPI) Use(mw ...MiddlewareFunction) {
+	jsonAPI.middleware = append(jsonAPI.middleware, mw...)
 }
 
 // Get request
 func (jsonAPI *JSONAPI) Get(url string, parameters url.Values,
 	responseBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
-	onInternalError InternalErrorCallback) {
-	jsonAPI.request("GET", url, parameters, nil, responseBody, onSuccess,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return jsonAPI.R().execute("GET", url, parameters, nil, responseBody, onSuccess,
 		onHTTPError, onInternalError)
 }
 
 // Put request
 func (jsonAPI *JSONAPI) Put(url string, parameters url.Values,
 	requestBody interface{}, responseBody interface{}, onSuccess SuccessCallback,
-	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) {
-	jsonAPI.request("PUT", url, parameters, requestBody, responseBody, onSuccess,
+	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return jsonAPI.R().execute("PUT", url, parameters, requestBody, responseBody, onSuccess,
 		onHTTPError, onInternalError)
 }
 
 // Post request
 func (jsonAPI *JSONAPI) Post(url string, parameters url.Values,
 	requestBody interface{}, responseBody interface{}, onSuccess SuccessCallback,
-	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) {
-	jsonAPI.request("POST", url, parameters, requestBody, responseBody, onSuccess,
+	onHTTPError HTTPErrorCallback, onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return jsonAPI.R().execute("POST", url, parameters, requestBody, responseBody, onSuccess,
 		onHTTPError, onInternalError)
 }
 
 // Delete request
 func (jsonAPI *JSONAPI) Delete(url string, parameters url.Values,
 	responseBody interface{}, onSuccess SuccessCallback, onHTTPError HTTPErrorCallback,
-	onInternalError InternalErrorCallback) {
-	jsonAPI.request("DELETE", url, parameters, nil, responseBody, onSuccess,
+	onInternalError InternalErrorCallback) (response *http.Response, err error) {
+	return jsonAPI.R().execute("DELETE", url, parameters, nil, responseBody, onSuccess,
 		onHTTPError, onInternalError)
 }
 
